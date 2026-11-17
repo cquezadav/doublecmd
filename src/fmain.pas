@@ -881,6 +881,7 @@ type
     procedure UpdateDiskCount;
     procedure UpdateDiskCountImpl; // [my-custom] original body; UpdateDiskCount wraps it with metrics
     procedure miMetricsClick(Sender: TObject); // [my-custom] Configuration > Metrics log
+    procedure miAgentClick(Sender: TObject);   // [my-custom] Configuration > Agent control (MCP)
     procedure UpdateSelectedDrives;
     procedure UpdateGUIFunctionKeys;
     procedure UpdateMainTitleBar;
@@ -972,7 +973,7 @@ uses
   uHotDir, uFileSorting, DCBasicTypes, foptionsDirectoryHotlist, uConnectionManager,
   fOptionsToolbarBase, fOptionsToolbarMiddle, fEditor, uColumns, StrUtils, uSysFolders,
   uColumnsFileView, dmHigh, uFileSourceOperationMisc, uVfsModule,
-  uMetrics, uMetricsHooks
+  uMetrics, uMetricsHooks, uAgentServer
 {$IFDEF MSWINDOWS}
   , uShellFileSource, uNetworkThread
 {$ENDIF}
@@ -1280,6 +1281,30 @@ begin
   MetricsItem.Checked := MetricsEnabled;
   MetricsItem.OnClick := @miMetricsClick;
   mnuConfig.Insert(mnuConfig.IndexOf(mnuConfigOptions) + 1, MetricsItem);
+
+  // [my-custom] agent control server (MCP bridge) + Configuration menu toggle
+  AgentServerInit(gpCfgDir);
+  MetricsItem := TMenuItem.Create(mnuConfig);
+  MetricsItem.Name := 'mnuAgentControl';
+  MetricsItem.Caption := 'Agent control (MCP server)';
+  MetricsItem.Checked := AgentServerEnabled;
+  MetricsItem.OnClick := @miAgentClick;
+  mnuConfig.Insert(mnuConfig.IndexOf(mnuConfigOptions) + 2, MetricsItem);
+end;
+
+procedure TfrmMain.miAgentClick(Sender: TObject);
+var
+  Item: TMenuItem;
+begin
+  Item := Sender as TMenuItem;
+  AgentServerSetEnabled(not AgentServerEnabled);
+  Item.Checked := AgentServerEnabled;
+  if AgentServerRunning then
+    msgToast(Format('Agent control ON (127.0.0.1:%d)', [AgentServerPort]) + LineEnding + AgentEndpointFile, 4000)
+  else if AgentServerEnabled then
+    msgToast('Agent control could not start (ports in use?)', 4000)
+  else
+    msgToast('Agent control OFF', 2000);
 end;
 
 procedure TfrmMain.miMetricsClick(Sender: TObject);
@@ -1964,6 +1989,7 @@ begin
   DCDebug('Destroying main form');
   // [my-custom] drop a pending DelayedUpdateDiskCount, if any
   Application.RemoveAsyncCalls(Self);
+  AgentServerShutdown;  // [my-custom]
   MetricsHooksRemove;
 
   if Assigned(HotMan) then
