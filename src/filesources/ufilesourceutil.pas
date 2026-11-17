@@ -60,7 +60,8 @@ uses
   uArchiveFileSourceUtil,
   uFileSourceOperationMessageBoxesUI,
   uFileProperty, URIParser,
-  WcxPlugin, uWcxModule, uHash, uSuperUser
+  WcxPlugin, uWcxModule, uHash, uSuperUser,
+  uWcxArchiveFileSource, uMultiArchiveFileSource, uDCUtils, uMetrics  // [my-custom]
 {$IFDEF DARWIN}
   , uDarwinFinderModel, uDarwinFileView
 {$ENDIF}
@@ -284,9 +285,36 @@ end;
 
 function ChooseArchive(aFileView: TFileView; aFileSource: IFileSource;
   aFile: TFile; bForce: Boolean): Boolean;
+const
+  // [my-custom] ask before opening archives at least this big; show "please wait" above BusySize
+  ConfirmSize = 200 * 1024 * 1024;
+  BusySize = 20 * 1024 * 1024;
 var
   FileSource: IFileSource;
+  ArcSize: Int64 = -1;
+  HasHandler, Busy: Boolean;
+  StartTick: QWord;
+  PrevActivity: String = '';
 begin
+  // [my-custom] confirm + busy indicator for big archives
+  HasHandler := bForce or
+                TWcxArchiveFileSource.CheckPluginByName(aFile.Name) or
+                TMultiArchiveFileSource.CheckAddonByName(aFile.Name);
+  if HasHandler and (fpSize in aFile.SupportedProperties) then
+    ArcSize := aFile.Size;
+  if HasHandler and (ArcSize >= ConfirmSize) then
+  begin
+    if not msgYesNo(Format('Open archive "%s" (%s)?' + LineEnding +
+                           'Reading a big archive can take a while.',
+                           [aFile.Name, cnvFormatFileSize(ArcSize)])) then
+      Exit(True);  // handled: do nothing
+  end;
+  Busy := HasHandler and (ArcSize >= BusySize);
+  if Busy then
+    msgBusyBegin(Format('  Opening "%s" (%s)...  please wait  ', [aFile.Name, cnvFormatFileSize(ArcSize)]));
+  StartTick := GetTickCount64;
+  if Busy then PrevActivity := MetricsActivityBegin('archive_open');
+  try
   try
     // Check if there is a ArchiveFileSource for possible archive.
     FileSource := GetArchiveFileSource(aFileSource, aFile, EmptyStr, bForce, False);
@@ -300,6 +328,15 @@ begin
         msgError(E.Message + LineEnding + aFile.FullPath);
         Exit(True);
       end;
+    end;
+  end;
+  finally
+    if Busy then
+    begin
+      msgBusyEnd;
+      MetricsActivityEnd(PrevActivity);
+      MetricsLog('archive_open', ['ext', ExtractFileExt(aFile.Name), 'bytes', ArcSize,
+                 'ms', Int64(GetTickCount64 - StartTick), 'ok', Assigned(FileSource)]);
     end;
   end;
 

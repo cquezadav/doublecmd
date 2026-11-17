@@ -178,7 +178,7 @@ type
 implementation
 
 uses
-  uGlobs, uHotkeyManager, DCStrUtils, uLng;
+  uGlobs, uHotkeyManager, DCStrUtils, uLng, uMetrics;
 
 type
   TCommandsFormRec = record
@@ -217,22 +217,36 @@ function TFormCommands.ExecuteCommand(Command: String; const Params: array of st
 var
   Method: TMethod;
   CommandRec: PCommandRec;
+  MToken: TMetricsCmdToken;
+  MResult: String;
 begin
-  CommandRec := GetCommandRec(Command);
-  if Assigned(CommandRec) then
-  begin
-    if Assigned(CommandRec^.Action) and not CommandRec^.Action.Enabled then
-      Result := cfrDisabled
-    else
+  // [my-custom] metrics: time every command and record where it came from
+  MToken := MetricsCommandBegin(Command);
+  MResult := 'error';
+  try
+    CommandRec := GetCommandRec(Command);
+    if Assigned(CommandRec) then
     begin
-      Method.Code := CommandRec^.Address;  // address of method
-      Method.Data := FInstanceObject;      // pointer to instance
-      TCommandFunc(Method)(Params);
-      Result := cfrSuccess;
+      if Assigned(CommandRec^.Action) and not CommandRec^.Action.Enabled then
+        Result := cfrDisabled
+      else
+      begin
+        Method.Code := CommandRec^.Address;  // address of method
+        Method.Data := FInstanceObject;      // pointer to instance
+        TCommandFunc(Method)(Params);
+        Result := cfrSuccess;
+      end;
+    end
+    else
+      Result := cfrNotFound;
+    case Result of
+      cfrSuccess:  MResult := 'ok';
+      cfrDisabled: MResult := 'disabled';
+      cfrNotFound: MResult := 'not_found';
     end;
-  end
-  else
-    Result := cfrNotFound;
+  finally
+    MetricsCommandEnd(MToken, MResult);
+  end;
 end;
 
 procedure TFormCommands.EnableCommand(Command: String; Enable: Boolean);

@@ -110,6 +110,13 @@ procedure msgWarning(Thread: TThread; const sMsg: String); overload;
 procedure msgError(const sMsg: String); overload;
 procedure msgError(Thread: TThread; const sMsg: String); overload;
 
+{en [my-custom] Non-blocking "toast": shows sMsg near the mouse cursor and
+    hides it after Duration ms. Main thread only. }
+procedure msgToast(const sMsg: String; Duration: Integer = 2000);
+// [my-custom] non-modal "please wait" note + hourglass while the main thread is busy
+procedure msgBusyBegin(const sMsg: String);
+procedure msgBusyEnd;
+
 function MsgBox(const sMsg: String; const Buttons: array of TMyMsgButton; ButDefault, ButEscape: TMyMsgButton; ActionHandler: TMyMsgActionHandler = nil): TMyMsgResult; overload;
 function MsgBox(Thread: TThread; const sMsg: String; const Buttons: array of TMyMsgButton; ButDefault, ButEscape: TMyMsgButton): TMyMsgResult; overload;
 
@@ -141,7 +148,7 @@ implementation
 
 uses
   LCLIntf, SysUtils, StdCtrls, Graphics, Math, typinfo, Menus,
-  fMsg, uLng, Buttons, Controls, uLog, uGlobs, uDebug;
+  fMsg, uLng, Buttons, Controls, uLog, uGlobs, uDebug, ExtCtrls, Types;
 
 const
   cMsgName = 'Double Commander';
@@ -488,6 +495,106 @@ end;
 procedure msgError(Thread: TThread; const sMsg: String);
 begin
   MsgBox(Thread, sMsg,[msmbOK],msmbOK, msmbOK)
+end;
+
+{ [my-custom] toast }
+type
+  TToastHelper = class
+    Wnd: THintWindow;
+    Timer: TTimer;
+    procedure OnTimer(Sender: TObject);
+  end;
+
+var
+  Toast: TToastHelper = nil;
+
+procedure TToastHelper.OnTimer(Sender: TObject);
+begin
+  Timer.Enabled := False;
+  Wnd.Hide;
+end;
+
+procedure msgToast(const sMsg: String; Duration: Integer);
+var
+  R, WA: TRect;
+  P: TPoint;
+  W, H: Integer;
+begin
+  // Not thread-safe (creates windows); fall back to the normal path off the main thread.
+  if GetCurrentThreadId <> MainThreadID then
+  begin
+    msgWarning(TThread.CurrentThread, sMsg);
+    Exit;
+  end;
+  if not Assigned(Toast) then
+  begin
+    Toast := TToastHelper.Create;
+    Toast.Wnd := THintWindow.Create(nil);
+    Toast.Timer := TTimer.Create(nil);
+    Toast.Timer.OnTimer := Toast.OnTimer;
+  end;
+  Toast.Timer.Enabled := False;
+  P := Mouse.CursorPos;
+  R := Toast.Wnd.CalcHintRect(Screen.Width div 2, sMsg, nil);
+  W := R.Right - R.Left;
+  H := R.Bottom - R.Top;
+  // Below-right of the cursor, kept inside the monitor's work area.
+  WA := Screen.MonitorFromPoint(P).WorkareaRect;
+  R.Left := Min(P.X + 12, WA.Right - W);
+  R.Top := P.Y + 18;
+  if R.Top + H > WA.Bottom then
+    R.Top := P.Y - H - 6;  // flip above the cursor near the bottom edge
+  R.Left := Max(R.Left, WA.Left);
+  R.Top := Max(R.Top, WA.Top);
+  R.Right := R.Left + W;
+  R.Bottom := R.Top + H;
+  Toast.Wnd.ActivateHint(R, sMsg);
+  Toast.Timer.Interval := Duration;
+  Toast.Timer.Enabled := True;
+end;
+
+{ [my-custom] busy note }
+var
+  BusyWnd: THintWindow = nil;
+  BusyDepth: Integer = 0;
+
+procedure msgBusyBegin(const sMsg: String);
+var
+  R, WA: TRect;
+  W, H: Integer;
+begin
+  if GetCurrentThreadId <> MainThreadID then Exit;
+  Inc(BusyDepth);
+  Screen.BeginWaitCursor;
+  if not Assigned(BusyWnd) then
+    BusyWnd := THintWindow.Create(nil);
+  R := BusyWnd.CalcHintRect(Screen.Width div 2, sMsg, nil);
+  W := R.Right - R.Left + 24;
+  H := R.Bottom - R.Top + 16;
+  // Centered over the main window (or the monitor under the cursor).
+  if Assigned(Application.MainForm) then
+    WA := Application.MainForm.BoundsRect
+  else
+    WA := Screen.MonitorFromPoint(Mouse.CursorPos).WorkareaRect;
+  R.Left := WA.Left + (WA.Right - WA.Left - W) div 2;
+  R.Top := WA.Top + (WA.Bottom - WA.Top - H) div 2;
+  R.Right := R.Left + W;
+  R.Bottom := R.Top + H;
+  BusyWnd.Alignment := taCenter;
+  BusyWnd.Color := $00B3ECFF;  // amber, same as locked tabs
+  BusyWnd.ActivateHint(R, sMsg);
+  // The caller is about to block the main thread: paint now.
+  BusyWnd.Update;
+end;
+
+procedure msgBusyEnd;
+begin
+  if GetCurrentThreadId <> MainThreadID then Exit;
+  if BusyDepth = 0 then Exit;
+  Dec(BusyDepth);
+  Screen.EndWaitCursor;
+  if (BusyDepth = 0) and Assigned(BusyWnd) then
+    BusyWnd.Hide;
 end;
 
 procedure msgWarning(const sMsg: String);
@@ -948,5 +1055,15 @@ begin
       DCDebug('Warning: MsgBox button ' + GetEnumName(TypeInfo(TMyMsgButton), Integer(I)) + ' caption not set.');
   end;
 end;
+
+finalization
+  // [my-custom] free the toast window/timer and busy note
+  if Assigned(Toast) then
+  begin
+    Toast.Timer.Free;
+    Toast.Wnd.Free;
+    Toast.Free;
+  end;
+  BusyWnd.Free;
 
 end.

@@ -253,7 +253,7 @@ implementation
 
 uses
   {$IFDEF timeFileView} uDebug, {$ENDIF}
-  LCLProc, Graphics, DCFileAttributes,
+  LCLProc, Graphics, DCFileAttributes, uMetrics,
   uFileSourceOperationTypes, uOSUtils, DCStrUtils, uDCUtils, uExceptions,
   uGlobs, uPixMapManager, uFileSourceProperty,
   uFileSourceCalcStatisticsOperation,
@@ -445,7 +445,17 @@ var
   I: Integer;
   HaveUpDir: Boolean = False;
   FileSourceFiles: TFiles = nil;
+  // [my-custom] metrics
+  MStart, MListed, MUiStart, MUiEnd: QWord;
+  MFiles: Integer = -1;
+  MKind: String;
 begin
+  MStart := MetricsTick;
+  MListed := 0; MUiStart := 0; MUiEnd := 0;
+  // 'incremental' = existing list updated in place (file watcher),
+  // 'full' = list built from scratch (open folder, Ctrl+R, tab switch)
+  if Assigned(FExistingDisplayFilesHashed) then MKind := 'incremental' else MKind := 'full';
+  MetricsSetLastFolder(FCurrentPath);
   try
     if Aborted then
       Exit;
@@ -479,6 +489,8 @@ begin
     {$IFDEF timeFileView}
     filelistPrintTime('Loaded files        : ');
     {$ENDIF}
+    MListed := MetricsTick;
+    if Assigned(FileSourceFiles) then MFiles := FileSourceFiles.Count;
 
     if Aborted then
       Exit;
@@ -562,7 +574,9 @@ begin
       Exit;
 
     // Loading file list is complete. Update grid with the new file list.
+    MUiStart := MetricsTick;
     TThread.Synchronize(Thread, @DoSetFilelist);
+    MUiEnd := MetricsTick;
 
     {$IFDEF timeFileView}
     filelistPrintTime('Grid files updated  : ');
@@ -572,6 +586,23 @@ begin
     {$IFDEF timeFileView}
     filelistPrintTime('Finished            : ');
     {$ENDIF}
+    // [my-custom] metrics: one 'folder' event per listing
+    // list_ms = reading the folder (disk/network), build_ms = sorting/filtering,
+    // ui_ms = updating the panel on the main thread (blocks the UI)
+    if MetricsEnabled then
+    try
+      if MListed = 0 then MListed := MetricsTick;
+      MetricsLog('folder', ['path', FCurrentPath, 'fs', FFileSource.ClassName,
+        'kind', MKind, 'flat', FFlatView, 'files', MFiles,
+        'list_ms', Int64(MListed - MStart),
+        'build_ms', Int64(Ord(MUiStart > 0) * (MUiStart - MListed)),
+        'ui_ms', Int64(MUiEnd - MUiStart),
+        'total_ms', Int64(MetricsTick - MStart),
+        'ok', Assigned(FileSourceFiles) and (MUiEnd > 0),
+        'aborted', Aborted]);
+    except
+      // never let metrics break folder loading
+    end;
 
     FreeAndNil(FFilteredDisplayFiles);
     FreeAndNil(FileSourceFiles);

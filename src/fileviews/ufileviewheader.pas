@@ -27,6 +27,7 @@ type
     procedure AddressLabelClick(Sender: TObject);
     procedure AddressLabelMouseEnter(Sender: TObject);
     procedure PathLabelDblClick(Sender: TObject);
+    procedure CopyPathToClipboard; // [my-custom]
     procedure tmViewHistoryMenuTimer(Sender: TObject);
 
     procedure PathLabelMouseWheelUp(Sender: TObject;Shift: TShiftState; MousePos: TPoint;var Handled:Boolean);
@@ -91,7 +92,7 @@ implementation
 uses
   LCLType, ShellCtrls, Graphics, uDCUtils, DCOSUtils, DCStrUtils, uKeyboard,
   fMain, uFileSourceUtil, uGlobs, uPixMapManager, uLng, uFileFunctions,
-  uArchiveFileSource, uFileViewWithPanels, uVfsModule;
+  uArchiveFileSource, uFileViewWithPanels, uVfsModule, Clipbrd, uShowMsg;
 
 const
   SortingImageIndex: array[TSortDirection] of Integer = (-1, 0, 1);
@@ -181,8 +182,29 @@ begin
 
     mbRight:
       begin
+        // [my-custom] right-click also copies the current path
+        CopyPathToClipboard;
         ShowPathEdit;
       end;
+  end;
+end;
+
+{ [my-custom] Copy the panel's path (no trailing separator except for a drive
+  root like C:\). Archive/plugin paths are prefixed with their address. }
+procedure TFileViewHeader.CopyPathToClipboard;
+var
+  APath: String;
+begin
+  APath := FFileView.CurrentPath;
+  if (Length(APath) > 1) and not (FFileView.FileSource.IsPathAtRoot(APath) and
+     (Length(APath) <= 3)) then
+    APath := ExcludeTrailingPathDelimiter(APath);
+  APath := FFileView.CurrentAddress + APath;
+  try
+    Clipboard.AsText := APath;
+    msgToast('Path copied: ' + APath);
+  except
+    // clipboard busy (e.g. RDP clipboard sync): don't break the click
   end;
 end;
 

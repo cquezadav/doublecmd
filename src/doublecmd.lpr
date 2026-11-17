@@ -36,6 +36,7 @@ uses
   uQtWorkaround,
   {$ENDIF}
   {$ENDIF}
+  uMetrics, // [my-custom] early, so its start tick is close to process start
   uSystem,
   Interfaces,
   uMoveConfig,
@@ -230,6 +231,7 @@ begin
       initCocoaModernFormConfig;
       iCloudDriveConfigUtil.load;
 {$ENDIF}
+      MetricsInit(gpCfgDir); // [my-custom] metrics log (off unless enabled)
       Application.CreateForm(TfrmMain, frmMain); // main form
       Application.CreateForm(TdmComData, dmComData); // common data
       Application.CreateForm(TdmHelpManager, dmHelpMgr); // help manager
@@ -248,7 +250,10 @@ begin
 
       frmMain.Show;
       Application.ProcessMessages;
+      // [my-custom] time from process start until the main window is up
+      MetricsLog('startup', ['ms', Int64(MetricsTick - MetricsProcessStartTick)]);
       Application.Run;
+      MetricsShutdown; // [my-custom] before LCL teardown
 
       if not UniqueInstance.isAnotherDCRunningWhileIamRunning then
         DeleteTempFolderDeletableAtTheEnd;

@@ -229,7 +229,7 @@ implementation
 
 uses
   Laz2_XMLRead, uKeyboard, uGlobs, uDebug, uDCVersion, uFormCommands,
-  DCOSUtils, DCStrUtils;
+  DCOSUtils, DCStrUtils, uMetrics;
 
 const
   MaxShortcutSequenceInterval = 1000; // in ms
@@ -1203,6 +1203,19 @@ begin
   end;
 end;
 
+// [my-custom] 'Ctrl+K Ctrl+C' style text for multi-key shortcut sequences
+function JoinShortcuts(const Shortcuts: array of String): String;
+var
+  I: Integer;
+begin
+  Result := '';
+  for I := Low(Shortcuts) to High(Shortcuts) do
+  begin
+    if Result <> '' then Result := Result + ' ';
+    Result := Result + Shortcuts[I];
+  end;
+end;
+
 function THotKeyManager.HotKeyEvent(Form: TCustomForm; Hotkeys: THotkeys): Boolean;
 var
   hotkey: THotkey;
@@ -1222,6 +1235,8 @@ begin
     begin
       FSequenceStep := 0;
       FormCommands := Form as IFormCommands;
+      // [my-custom] metrics: this command came from a keyboard shortcut
+      MetricsSetCmdSource('hotkey', JoinShortcuts(hotkey.Shortcuts));
       Result := Assigned(FormCommands) and
                 (FormCommands.ExecuteCommand(hotkey.Command, hotkey.Params) = cfrSuccess);
     end;

@@ -571,20 +571,89 @@ end;
 {$ENDIF}
 
 {$IF DEFINED(LCLWIN32)}
+{ [my-custom] Paint tab backgrounds so tabs are easy to tell apart:
+    active tab, active panel   -> solid accent color, white text
+    active tab, other panel    -> light blue
+    locked tab (not active)    -> amber, with a darker amber bar on top
+  The native tab control keeps sizing/hit-testing; we only repaint the
+  interior of each tab and draw its caption again. }
 procedure TFileViewNotebook.PaintWindow(DC: HDC);
+const
+  CLR_ACTIVE_OTHER = $00F7E4CC;  // BGR of RGB(204,228,247) light blue
+  CLR_LOCKED       = $00B3ECFF;  // BGR of RGB(255,236,179) amber
+  CLR_LOCKED_BAR   = $0000A5FF;  // BGR of RGB(255,165,0)   orange
 var
-  ARect: TRect;
+  I, Saved: Integer;
+  ARect, TextRect, Bar: TRect;
+  Locked, IsActiveTab, PanelActive: Boolean;
+  BackColor, TextColor: TColor;
+  hBr: HBRUSH;
+  OldFont: HGDIOBJ;
+  TabText: UnicodeString;
 begin
   inherited PaintWindow(DC);
 {$IF DEFINED(DARKWIN)}
   if g_darkModeEnabled then Exit;
 {$ENDIF}
-  if (Win32MajorVersion >= 10) and (PageIndex > -1) then
-  begin
-    ARect:= TabRect(PageIndex);
-    IntersectClipRect(DC, ARect.Left, ARect.Top, ARect.Right, ARect.Top + ScaleY(3, 96));
-    InflateRect(ARect, ScaleX(8, 96), 0);
-    DrawThemeBackground(TWin32ThemeServices(ThemeServices).Theme[teToolBar], DC, TP_BUTTON, TS_CHECKED, ARect, nil);
+  if not ShowTabs then Exit;
+
+  PanelActive := Assigned(ActiveView) and ActiveView.Active;
+  Saved := SaveDC(DC);
+  try
+    OldFont := SelectObject(DC, Font.Reference.Handle);
+    SetBkMode(DC, TRANSPARENT);
+    for I := 0 to PageCount - 1 do
+    begin
+      IsActiveTab := I = PageIndex;
+      Locked := Page[I].LockState in [tlsPathLocked, tlsPathResets, tlsDirsInNewTab];
+      if not (IsActiveTab or Locked) then Continue;
+
+      ARect := TabRect(I);
+      if IsRectEmpty(ARect) then Continue;
+      // keep the native border, repaint the inside
+      InflateRect(ARect, -ScaleX(2, 96), 0);
+      Inc(ARect.Top, ScaleY(2, 96));
+      if not IsActiveTab then Dec(ARect.Bottom, ScaleY(1, 96));
+
+      if IsActiveTab and PanelActive then
+      begin
+        BackColor := ColorToRGB(clHighlight);
+        TextColor := ColorToRGB(clHighlightText);
+      end
+      else if IsActiveTab then
+      begin
+        BackColor := CLR_ACTIVE_OTHER;
+        TextColor := ColorToRGB(clWindowText);
+      end
+      else begin
+        BackColor := CLR_LOCKED;
+        TextColor := ColorToRGB(clWindowText);
+      end;
+
+      hBr := CreateSolidBrush(BackColor);
+      Windows.FillRect(DC, ARect, hBr);
+      DeleteObject(hBr);
+
+      // orange bar marks locked tabs, also when they are the active tab
+      if Locked then
+      begin
+        Bar := ARect;
+        Bar.Bottom := Bar.Top + ScaleY(4, 96);
+        hBr := CreateSolidBrush(CLR_LOCKED_BAR);
+        Windows.FillRect(DC, Bar, hBr);
+        DeleteObject(hBr);
+      end;
+
+      TextRect := ARect;
+      if Locked then Inc(TextRect.Top, ScaleY(2, 96));
+      SetTextColor(DC, TextColor);
+      TabText := UTF8Decode(Page[I].Caption);  // '&&' -> '&' via prefix processing
+      DrawTextW(DC, PWideChar(TabText), Length(TabText), TextRect,
+        DT_CENTER or DT_VCENTER or DT_SINGLELINE or DT_END_ELLIPSIS);
+    end;
+    SelectObject(DC, OldFont);
+  finally
+    RestoreDC(DC, Saved);
   end;
 end;
 {$ENDIF}

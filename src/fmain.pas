@@ -598,6 +598,11 @@ type
       var {%H-}Accept: Boolean);
     procedure dskLeftRightToolButtonDragDrop(Sender, {%H-}Source: TObject; {%H-}X, {%H-}Y: Integer);
     procedure dskToolButtonMouseUp(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
+    // [my-custom] hide/unhide drives from the drive bar
+    procedure ShowDriveHideMenu(ADrive: PDrive; X, Y: Integer);
+    procedure miHideDriveClick(Sender: TObject);
+    procedure miUnhideDriveClick(Sender: TObject);
+    procedure DelayedUpdateDiskCount(Data: PtrInt);
     procedure lblAllProgressPctClick(Sender: TObject);
     procedure MainToolBarToolButtonDragDrop(Sender, Source: TObject; X, Y: Integer);
     procedure MainToolBarToolButtonDragOver(Sender, Source: TObject; X,
@@ -726,6 +731,7 @@ type
        can be used, because the user can do only one menu popup at a time. }
     FDropParams: TDropParams;
     FDrivesListPopup: TDrivesListPopup;
+    FDriveHideMenu: TPopupMenu; // [my-custom] Shift+right-click menu on drive buttons
     FOperationsPanel: TOperationsPanel;
     FSyncChangeParent: Boolean;
     FSyncChangeDir: String;
@@ -873,6 +879,8 @@ type
     procedure UpdateTreeViewPath;
     procedure UpdateTreeView;
     procedure UpdateDiskCount;
+    procedure UpdateDiskCountImpl; // [my-custom] original body; UpdateDiskCount wraps it with metrics
+    procedure miMetricsClick(Sender: TObject); // [my-custom] Configuration > Metrics log
     procedure UpdateSelectedDrives;
     procedure UpdateGUIFunctionKeys;
     procedure UpdateMainTitleBar;
@@ -963,7 +971,8 @@ uses
   Laz2_XMLRead, DCOSUtils, DCStrUtils, fOptions, fOptionsFrame, fOptionsToolbar, uClassesEx,
   uHotDir, uFileSorting, DCBasicTypes, foptionsDirectoryHotlist, uConnectionManager,
   fOptionsToolbarBase, fOptionsToolbarMiddle, fEditor, uColumns, StrUtils, uSysFolders,
-  uColumnsFileView, dmHigh, uFileSourceOperationMisc, uVfsModule
+  uColumnsFileView, dmHigh, uFileSourceOperationMisc, uVfsModule,
+  uMetrics, uMetricsHooks
 {$IFDEF MSWINDOWS}
   , uShellFileSource, uNetworkThread
 {$ENDIF}
@@ -1104,6 +1113,7 @@ procedure TfrmMain.FormCreate(Sender: TObject);
 var
   HMMainForm: THMForm;
   I: Integer;
+  MetricsItem: TMenuItem; // [my-custom]
 begin
   Application.OnException := @AppException;
   Application.OnActivate := @AppActivate;
@@ -1261,6 +1271,28 @@ begin
   TDarwinApplicationUtil.initServiceProvider( @OnNSServiceOpenWithNewTab, @NSServiceMenuIsReady, @NSServiceMenuGetFilenames );
   TDarwinFileViewUtil.init( @ActiveNotebook, @ActiveFrame );
 {$ENDIF}
+
+  // [my-custom] metrics: file-operation hook + Configuration > Metrics log toggle
+  MetricsHooksInstall;
+  MetricsItem := TMenuItem.Create(mnuConfig);
+  MetricsItem.Name := 'mnuMetricsLog';
+  MetricsItem.Caption := 'Metrics log (performance && usage)';
+  MetricsItem.Checked := MetricsEnabled;
+  MetricsItem.OnClick := @miMetricsClick;
+  mnuConfig.Insert(mnuConfig.IndexOf(mnuConfigOptions) + 1, MetricsItem);
+end;
+
+procedure TfrmMain.miMetricsClick(Sender: TObject);
+var
+  Item: TMenuItem;
+begin
+  Item := Sender as TMenuItem;
+  MetricsSetEnabled(not MetricsEnabled);
+  Item.Checked := MetricsEnabled;
+  if MetricsEnabled then
+    msgToast('Metrics log ON' + LineEnding + MetricsDir, 4000)
+  else
+    msgToast('Metrics log OFF', 2000);
 end;
 
 procedure TfrmMain.btnLeftClick(Sender: TObject);
@@ -1274,6 +1306,7 @@ var
 begin
   cmd := (Sender as TAction).Name;
   cmd := 'cm_' + Copy(cmd, 4, Length(cmd) - 3);
+  MetricsSetCmdSource('menu'); // [my-custom] menus and function-key buttons
   Commands.Commands.ExecuteCommand(cmd, []);
 end;
 
@@ -1422,9 +1455,139 @@ begin
             pt.X := X;
             pt.Y := Y;
             pt := ClientToScreen(pt);
-            ShowDriveContextMenu(Parent, DrivesList[Tag], pt.X, pt.Y, nil);
+            if ssShift in Shift then
+              ShowDriveHideMenu(DrivesList[Tag], pt.X, pt.Y)
+            else
+              ShowDriveContextMenu(Parent, DrivesList[Tag], pt.X, pt.Y, nil);
           end;
       end;
+end;
+
+{ [my-custom] Drive bar: Shift+right-click a drive to hide it, or unhide a
+  previously hidden one. Hidden drives are stored in the existing
+  "Drives blacklist" option (Options > Behaviors), separated by ';'. }
+// Split the ';'-separated black list into trimmed, non-empty entries.
+// (Manual split: TStringList.DelimitedText would add/strip quotes.)
+procedure SplitDriveBlackList(const S: String; List: TStrings);
+var
+  Start, I: Integer;
+  Item: String;
+begin
+  List.Clear;
+  Start := 1;
+  for I := 1 to Length(S) + 1 do
+    if (I > Length(S)) or (S[I] = ';') then
+    begin
+      Item := Trim(Copy(S, Start, I - Start));
+      if Item <> '' then
+        List.Add(Item);
+      Start := I + 1;
+    end;
+end;
+
+function JoinDriveBlackList(List: TStrings): String;
+var
+  I: Integer;
+begin
+  Result := '';
+  for I := 0 to List.Count - 1 do
+  begin
+    if Result <> '' then Result := Result + ';';
+    Result := Result + List[I];
+  end;
+end;
+
+function MenuSafe(const S: String): String;
+begin
+  Result := StringReplace(S, '&', '&&', [rfReplaceAll]);
+end;
+
+procedure TfrmMain.ShowDriveHideMenu(ADrive: PDrive; X, Y: Integer);
+var
+  I: Integer;
+  Hidden: TStringList;
+  mi, miUnhide: TMenuItem;
+begin
+  if not Assigned(FDriveHideMenu) then
+    FDriveHideMenu := TPopupMenu.Create(Self);
+  FDriveHideMenu.Items.Clear;
+
+  if ADrive^.DriveType <> dtVirtual then
+  begin
+    mi := TMenuItem.Create(FDriveHideMenu);
+    mi.Caption := MenuSafe(Trim('Hide ' + ADrive^.DisplayName + ' ' + ADrive^.DriveLabel));
+    mi.Hint := ADrive^.Path;
+    mi.OnClick := @miHideDriveClick;
+    FDriveHideMenu.Items.Add(mi);
+  end;
+
+  Hidden := TStringList.Create;
+  try
+    SplitDriveBlackList(gDriveBlackList, Hidden);
+    miUnhide := TMenuItem.Create(FDriveHideMenu);
+    miUnhide.Caption := 'Unhide';
+    for I := 0 to Hidden.Count - 1 do
+    begin
+      mi := TMenuItem.Create(miUnhide);
+      mi.Caption := MenuSafe(Hidden[I]);
+      mi.Hint := Hidden[I];
+      mi.OnClick := @miUnhideDriveClick;
+      miUnhide.Add(mi);
+    end;
+    miUnhide.Enabled := miUnhide.Count > 0;
+    FDriveHideMenu.Items.Add(miUnhide);
+  finally
+    Hidden.Free;
+  end;
+
+  FDriveHideMenu.PopUp(X, Y);
+end;
+
+procedure TfrmMain.miHideDriveClick(Sender: TObject);
+var
+  Entry: String;
+  Hidden: TStringList;
+begin
+  Entry := (Sender as TMenuItem).Hint;
+  if Entry = '' then Exit;
+  Hidden := TStringList.Create;
+  try
+    SplitDriveBlackList(gDriveBlackList, Hidden);
+    if Hidden.IndexOf(Entry) < 0 then
+      Hidden.Add(Entry);
+    gDriveBlackList := JoinDriveBlackList(Hidden);
+  finally
+    Hidden.Free;
+  end;
+  // Rebuild later: we are still inside the drive button's mouse handler,
+  // and rebuilding destroys that button.
+  Application.QueueAsyncCall(@DelayedUpdateDiskCount, 0);
+end;
+
+procedure TfrmMain.miUnhideDriveClick(Sender: TObject);
+var
+  I: Integer;
+  Entry: String;
+  Hidden: TStringList;
+begin
+  Entry := (Sender as TMenuItem).Hint;
+  Hidden := TStringList.Create;
+  try
+    SplitDriveBlackList(gDriveBlackList, Hidden);
+    for I := Hidden.Count - 1 downto 0 do
+      if SameText(Hidden[I], Entry) then
+        Hidden.Delete(I);
+    gDriveBlackList := JoinDriveBlackList(Hidden);
+  finally
+    Hidden.Free;
+  end;
+  Application.QueueAsyncCall(@DelayedUpdateDiskCount, 0);
+end;
+
+procedure TfrmMain.DelayedUpdateDiskCount(Data: PtrInt);
+begin
+  SaveGlobs;
+  UpdateDiskCount;
 end;
 
 procedure TfrmMain.ConsoleSplitterCanResize(Sender: TObject;
@@ -1799,6 +1962,9 @@ end;
 procedure TfrmMain.FormDestroy(Sender: TObject);
 begin
   DCDebug('Destroying main form');
+  // [my-custom] drop a pending DelayedUpdateDiskCount, if any
+  Application.RemoveAsyncCalls(Self);
+  MetricsHooksRemove;
 
   if Assigned(HotMan) then
   begin
@@ -2347,6 +2513,7 @@ var
   DriveItem: TKASDriveItem;
 begin
   DriveItem := ToolItem as TKASDriveItem;
+  MetricsLog('drive_click', ['drive', DriveItem.Drive^.Path, 'label', DriveItem.Drive^.DriveLabel, 'panel', 'left']); // [my-custom]
   SetPanelDrive(fpLeft, DriveItem.Drive, True);
 end;
 
@@ -5005,12 +5172,40 @@ end;
 
 procedure TfrmMain.UpdateDiskCount;
 var
+  MStart: QWord;
+  MPrev: String;
+begin
+  // [my-custom] metrics: time the whole drive list / drive bar rebuild
+  MStart := MetricsTick;
+  MPrev := MetricsActivityBegin('drives_refresh');
+  try
+    UpdateDiskCountImpl;
+  finally
+    MetricsActivityEnd(MPrev);
+    if Assigned(DrivesList) then
+      MetricsLog('drives', ['ms', Int64(MetricsTick - MStart),
+        'count', DrivesList.Count, 'hidden', gDriveBlackList]);
+  end;
+end;
+
+procedure TfrmMain.UpdateDiskCountImpl;
+var
   I: Integer;
   Drive: PDrive;
 begin
   DrivesList.Free;
   DrivesList := TDriveWatcher.GetDrivesList;
   DrivesList.Sort(@CompareDrives);
+
+{$IF DEFINED(MSWINDOWS)}
+  // [my-custom] add shell drives (phones, portable devices) BEFORE applying
+  // the black list, so they can be hidden too. Must also run before the
+  // network icon loaders start, since those keep pointers to list items.
+  if (Win32MajorVersion > 5) then
+  begin
+    TShellFileSource.ListDrives(DrivesList, gUpperCaseDriveLetter);
+  end;
+{$ENDIF}
 
   { Delete drives that in drives black list }
   for I:= DrivesList.Count - 1 downto 0 do
@@ -5034,10 +5229,6 @@ begin
           Start;
       end;
     end;
-  end;
-  if (Win32MajorVersion > 5) then
-  begin
-    TShellFileSource.ListDrives(DrivesList, gUpperCaseDriveLetter);
   end;
 {$ENDIF}
 
@@ -5126,6 +5317,7 @@ var
   BitmapTmp: Graphics.TBitmap;
   ToolItem: TKASDriveItem;
   Button: TKASToolButton;
+  DriveLabel: String;
 begin
   dskPanel.BeginUpdate;
   try
@@ -5140,6 +5332,15 @@ begin
       ToolItem := TKASDriveItem.Create;
       ToolItem.Drive := Drive;
       ToolItem.Text := Drive^.DisplayName;
+      // [my-custom] show the volume label next to the drive letter
+      DriveLabel := Trim(Drive^.DriveLabel);
+      if (Drive^.DriveType <> dtVirtual) and (DriveLabel <> '') and
+         (DriveLabel <> Drive^.DisplayName) then
+      begin
+        if UTF8Length(DriveLabel) > 16 then
+          DriveLabel := UTF8Copy(DriveLabel, 1, 15) + #$E2#$80#$A6; // UTF-8 ellipsis
+        ToolItem.Text := Drive^.DisplayName + ' ' + DriveLabel;
+      end;
       ToolItem.Hint := GetDriveLabelOrStatus(Drive);
       Button := dskPanel.AddButton(ToolItem);
 
@@ -5503,6 +5704,7 @@ begin
   if not Draging then
   begin
     CommandItem := ToolItem as TKASCommandItem;
+    MetricsSetCmdSource('toolbar'); // [my-custom]
     CommandFuncResult:=Commands.Commands.ExecuteCommand(CommandItem.Command, CommandItem.Params);
     if gToolbarReportErrorWithCommands AND (CommandFuncResult=cfrNotFound) then
     begin
@@ -6899,6 +7101,7 @@ begin
     Panel := fpRight
   else
     Panel := ActiveNotebook.Side;
+  MetricsLog('drive_click', ['drive', DriveItem.Drive^.Path, 'label', DriveItem.Drive^.DriveLabel, 'panel', 'right']); // [my-custom]
   SetPanelDrive(Panel, DriveItem.Drive, True);
 end;
 
@@ -7275,7 +7478,8 @@ begin
   end
   else
   begin
-    msgWarning(rsMsgDiskNotAvail);
+    // [my-custom] soft message instead of a modal OK dialog
+    msgToast(rsMsgDiskNotAvail);
 
     // Restore previous selected button.
     case aPanel of

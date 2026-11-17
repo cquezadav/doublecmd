@@ -2085,11 +2085,20 @@ begin
 end;
 
 procedure TFileView.SetActive(bActive, bNotify: Boolean);
+var
+  Ctl: TWinControl;
 begin
   if FActive <> bActive then
   begin
     FActive := bActive;
     DoActiveChanged;
+    // [my-custom] repaint this panel's tab strip: the active tab color
+    // depends on whether the panel is active
+    Ctl := Parent;
+    while Assigned(Ctl) and not (Ctl is TCustomTabControl) do
+      Ctl := Ctl.Parent;
+    if Assigned(Ctl) then
+      Ctl.Invalidate;
   end;
 
   if bActive and bNotify then
