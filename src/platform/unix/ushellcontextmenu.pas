@@ -74,7 +74,7 @@ type
 implementation
 
 uses
-  LCLProc, Dialogs, Graphics, uFindEx, uDCUtils, uShowMsg, uFileSystemFileSource,
+  LCLProc, Dialogs, Graphics, uFindEx, uDCUtils, uShowMsg, uFileSystemFileSource, uRclone,
   uOSUtils, uFileProcs, uShellExecute, uLng, uPixMapManager, uMyUnix, uOSForms,
   fMain, fFileProperties, DCOSUtils, DCStrUtils, uExts, uArchiveFileSourceUtil, uSysFolders
   {$IF DEFINED(DARWIN)}
@@ -972,6 +972,15 @@ begin
         mi:=TMenuItem.Create(Self);
         mi.Action := frmMain.actDelete;
         Self.Items.Add(mi);
+
+        // [my-custom] rclone submenu (verified copy / move, sync, compare)
+        if RcloneExe <> '' then
+        begin
+          mi:=TMenuItem.Create(Self);
+          mi.Caption:= RcloneMenuCaption;
+          RcloneFillMenu(mi);
+          Self.Items.Add(mi);
+        end;
 
         // Add "Rename"
         mi:=TMenuItem.Create(Self);

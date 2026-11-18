@@ -259,6 +259,10 @@ type
    procedure cm_LinuxPartitions(const {%H-}Params: array of string); // [my-custom]
    procedure cm_AgentControl(const {%H-}Params: array of string);    // [my-custom]
    procedure cm_DiskTools(const {%H-}Params: array of string);       // [my-custom]
+   procedure cm_RcloneCopy(const {%H-}Params: array of string);      // [my-custom]
+   procedure cm_RcloneMove(const {%H-}Params: array of string);      // [my-custom]
+   procedure cm_RcloneSync(const {%H-}Params: array of string);      // [my-custom]
+   procedure cm_RcloneCheck(const {%H-}Params: array of string);     // [my-custom]
    procedure cm_ShowSysFiles(const {%H-}Params: array of string);
    procedure cm_SwitchIgnoreList(const Params: array of string);
    procedure cm_Options(const Params: array of string);
@@ -391,7 +395,7 @@ type
 
 implementation
 
-uses {$IFDEF MSWINDOWS}uDiskTools, {$ENDIF}fOptionsPluginsBase, fOptionsPluginsDSX, fOptionsPluginsWCX,
+uses {$IFDEF MSWINDOWS}uDiskTools, {$ENDIF}uRclone, fOptionsPluginsBase, fOptionsPluginsDSX, fOptionsPluginsWCX,
      fOptionsPluginsWDX, fOptionsPluginsWFX, fOptionsPluginsWLX, uFlatViewFileSource,
      uFindFiles, Forms, Controls, Dialogs, Clipbrd, strutils, LCLProc, HelpIntfs, DCStringHashListUtf8,
      dmHelpManager, typinfo, fMain, fPackDlg, fMkDir, DCDateTimeUtils, KASToolBar, KASToolItems,
@@ -2959,6 +2963,27 @@ end;
 procedure TMainCommands.cm_LinuxPartitions(const Params: array of string);
 begin
   frmMain.ShowLinuxPartitions;
+end;
+
+// [my-custom] rclone: verified copy / move, folder sync and compare
+procedure TMainCommands.cm_RcloneCopy(const Params: array of string);
+begin
+  RcloneRun(roCopy);
+end;
+
+procedure TMainCommands.cm_RcloneMove(const Params: array of string);
+begin
+  RcloneRun(roMove);
+end;
+
+procedure TMainCommands.cm_RcloneSync(const Params: array of string);
+begin
+  RcloneRun(roSync);
+end;
+
+procedure TMainCommands.cm_RcloneCheck(const Params: array of string);
+begin
+  RcloneRun(roCheck);
 end;
 
 // [my-custom] Disk tools window (format, check / repair, partitions)

@@ -80,7 +80,7 @@ uses
   uShellExecute, fMain, uDCUtils, uFormCommands, DCOSUtils, uOSUtils, uShowMsg,
   uExts, uFileSystemFileSource, DCConvertEncoding, LazUTF8, uOSForms, uGraphics,
   Forms, DCWindows, DCStrUtils, Clipbrd, uFileSystemWatcher, uShellFolder,
-  uOleDragDrop, uGdiPlus;
+  uOleDragDrop, uGdiPlus, uRclone;
 
 const
   USER_CMD_ID = $1000;
@@ -668,6 +668,9 @@ var
   aFile: TFile = nil;
   i: integer;
   hActionsSubMenu: HMENU = 0;
+  hRcloneSubMenu: HMENU = 0;
+  RcOp: TRcloneOp;
+  RcIdx: Integer;
   iActionsItemsCount: integer;
   cmd: UINT = 0;
   iCmd: integer;
@@ -763,6 +766,18 @@ begin
 
               if (FUserWishForContextMenu = uwcmComplete) and (iActionsItemsCount > 0) then
                 InsertMenuItemEx(FShellMenu, hActionsSubMenu, PWideChar(CeUtf8ToUtf16(rsMnuActions)), I, 333, MFT_STRING);
+
+              // [my-custom] rclone submenu (verified copy / move, sync, compare)
+              if (FUserWishForContextMenu = uwcmComplete) and (RcloneExe <> '') then
+              begin
+                hRcloneSubMenu := CreatePopupMenu;
+                for RcOp := Low(TRcloneOp) to High(TRcloneOp) do
+                begin
+                  RcIdx := InnerExtActionList.Add(TExtActionCommand.Create(RcloneCaptions[RcOp], RcloneCommands[RcOp], '', ''));
+                  InsertMenuItemEx(hRcloneSubMenu, 0, PWideChar(CeUtf8ToUtf16(RcloneCaptions[RcOp])), Ord(RcOp), RcIdx + USER_CMD_ID, MFT_STRING);
+                end;
+                InsertMenuItemEx(FShellMenu, hRcloneSubMenu, PWideChar(CeUtf8ToUtf16(RcloneMenuCaption)), I + 1, 334, MFT_STRING);
+              end;
             end;
             { /Actions submenu }
           end;
@@ -771,6 +786,8 @@ begin
         finally
           if hActionsSubMenu <> 0 then
             DestroyMenu(hActionsSubMenu);
+          if hRcloneSubMenu <> 0 then
+            DestroyMenu(hRcloneSubMenu);
         end;
 
       if (cmd > 0) and (cmd < USER_CMD_ID) then
