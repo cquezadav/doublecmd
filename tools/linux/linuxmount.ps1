@@ -3,6 +3,8 @@
 #   linuxmount.ps1 list                               -> JSON: prerequisites + every Linux partition
 #   linuxmount.ps1 mount -Disk 8 -Partition 2 [-ReadWrite] [-Letter R:]
 #   linuxmount.ps1 unmount -Disk 8 [-Partition 2]
+#   linuxmount.ps1 share   -Disk 8 -Partition 2   -> smb://<pc ip>:4450/<name> for other devices
+#   linuxmount.ps1 unshare -Disk 8 -Partition 2
 #
 # list is fast (partition table only, no admin, does not start WSL).
 # mount: WSL2 attaches the partition (one admin prompt), a hidden
@@ -10,10 +12,17 @@
 #   letter through WinFsp. Read-only unless -ReadWrite.
 # unmount: stops the drive letter and detaches the disk (other mounted disks are
 #   re-attached in the same admin prompt; WSL can only reliably release all).
+# share: Samba inside WSL serves the mounted partition (Windows cannot share the
+#   R: letter: it lives in the user's session, the SMB server can't see it).
+#   Windows already owns port 445, so Samba listens on 4450 and Windows forwards
+#   <pc>:4450 -> WSL (netsh portproxy + a Private-network firewall rule; one admin
+#   prompt, again only when WSL's address changed). Login: user "games" + the
+#   password in %LOCALAPPDATA%\doublecmd-linuxmount\samba-password.txt.
+#   Read-only when the partition is mounted read-only.
 # State of our mounts: %LOCALAPPDATA%\doublecmd-linuxmount\mounts.json
 # Prints one JSON object; exit code 0 = ok.
 param(
-  [Parameter(Position = 0)][ValidateSet('list', 'mount', 'unmount')][string]$Action = 'list',
+  [Parameter(Position = 0)][ValidateSet('list', 'mount', 'unmount', 'share', 'unshare')][string]$Action = 'list',
   [int]$Disk = -1,
   [int]$Partition = -1,
   [switch]$ReadWrite,
@@ -109,6 +118,8 @@ function Get-LinuxPartitions {
         letter = $(if ($mounted.ContainsKey($key)) { $mounted[$key] } else { '' })
         hides = $(if ($st.ContainsKey($key)) { "$($st[$key].hides)" } else { $hides -join ' ' })
         label = $(if ($st.ContainsKey($key)) { "$($st[$key].label)" } else { '' })
+        shared = $(if ($st.ContainsKey($key) -and $st[$key].shared -and $mounted.ContainsKey($key)) { $true } else { $false })
+        share_name = $(if ($st.ContainsKey($key)) { Get-ShareName $st[$key] } else { '' })
       }
     }
   }
@@ -172,6 +183,106 @@ function Get-LiveState([string]$Distro) {
   # Only entries whose partition is really attached in WSL right now.
   $att = Get-AttachedInWsl $Distro
   @(Get-State | Where-Object { $att -contains "PHYSICALDRIVE$($_.disk)p$($_.partition)" })
+}
+
+# ---- network share (Samba in WSL) ----
+$SmbPort = 4450
+$SmbUser = 'games'
+$FwName = 'DoubleCommander-Samba-WSL'
+$PwFile = Join-Path $StateDir 'samba-password.txt'
+
+function Get-ShareName($e) {
+  $n = ("$($e.label)" -replace '[^A-Za-z0-9\-]+', '-').Trim('-')
+  if (-not $n) { $n = "Linux-$($e.disk)-$($e.partition)" }
+  $n
+}
+
+function Invoke-WslRoot([string]$Distro, [string]$Script) {
+  # script through a temp file: inline quoting through wsl.exe gets mangled
+  $f = Join-Path $env:TEMP ("linuxmount-{0}.sh" -f [guid]::NewGuid().ToString('N'))
+  [IO.File]::WriteAllText($f, ($Script -replace "`r", ''), (New-Object Text.UTF8Encoding $false))
+  $lin = '/mnt/' + $f.Substring(0, 1).ToLower() + ($f.Substring(2) -replace '\\', '/')
+  $out = @(); $code = -1
+  try {
+    $ErrorActionPreference = 'Continue'
+    $out = @(& wsl.exe -d $Distro -u root -e sh $lin 2>&1 | ForEach-Object { "$_" })
+    $code = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = 'Stop'
+    Remove-Item $f -ErrorAction SilentlyContinue
+  }
+  @{ code = $code; out = $out }
+}
+
+function Get-SambaPassword {
+  if (Test-Path $PwFile) { $pw = "$(Get-Content $PwFile -Raw)".Trim(); if ($pw) { return $pw } }
+  $chars = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+  $pw = -join (1..12 | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
+  New-Item -ItemType Directory -Force $StateDir | Out-Null
+  Set-Content $PwFile $pw -NoNewline
+  $pw
+}
+
+function Update-Samba([string]$Distro, $Entries) {
+  # Rewrites the share list (installs + configures Samba on first use) and
+  # restarts it; stops it when nothing is shared. Last output line = WSL's IP.
+  $conf = (@($Entries | Where-Object { $_.shared }) | ForEach-Object {
+    "[$(Get-ShareName $_)]`n   path = /mnt/wsl/PHYSICALDRIVE$($_.disk)p$($_.partition)`n" +
+    "   read only = $(if ($_.readwrite) { 'no' } else { 'yes' })`n   valid users = $SmbUser`n   force user = root`n"
+  }) -join "`n"
+  $any = if ($conf) { 1 } else { 0 }
+  $sh = @'
+set -e
+if ! command -v smbd >/dev/null 2>&1; then
+  [ __ANY__ = 1 ] || exit 0
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq >/dev/null 2>&1 || true
+  apt-get install -y -qq samba >/dev/null 2>&1
+fi
+id __USER__ >/dev/null 2>&1 || useradd -M -s /usr/sbin/nologin __USER__
+printf '%s\n%s\n' '__PW__' '__PW__' | smbpasswd -s -a __USER__ >/dev/null
+C=/etc/samba/smb.conf
+grep -q '^ *smb ports' $C || sed -i 's/^\[global\]/[global]\n   smb ports = __PORT__/' $C
+grep -q 'doublecmd-shares.conf' $C || printf '\ninclude = /etc/samba/doublecmd-shares.conf\n' >> $C
+cat > /etc/samba/doublecmd-shares.conf <<'EOF'
+__CONF__
+EOF
+if [ __ANY__ = 1 ]; then
+  systemctl enable smbd >/dev/null 2>&1 || true
+  systemctl restart smbd
+else
+  systemctl stop smbd >/dev/null 2>&1 || true
+fi
+hostname -I | cut -d' ' -f1
+'@
+  $sh = $sh.Replace('__ANY__', "$any").Replace('__USER__', $SmbUser).Replace('__PW__', (Get-SambaPassword)).Replace('__PORT__', "$SmbPort").Replace('__CONF__', $conf)
+  Invoke-WslRoot $Distro $sh
+}
+
+function Stop-Samba([string]$Distro) {
+  # open shares keep the mount busy, so stop Samba before WSL releases disks
+  Invoke-WslRoot $Distro 'systemctl stop smbd >/dev/null 2>&1 || true' | Out-Null
+}
+
+function Test-Forward([string]$Ip) {
+  $pp = (& netsh interface portproxy show v4tov4) -join "`n"
+  $okPP = $pp -match ("0\.0\.0\.0\s+$SmbPort\s+" + [regex]::Escape($Ip) + "\s+$SmbPort")
+  $okFw = [bool](Get-NetFirewallRule -DisplayName $FwName -ErrorAction SilentlyContinue)
+  $okPP -and $okFw
+}
+
+function Get-ForwardCommands([string]$Ip) {
+  @("netsh interface portproxy delete v4tov4 listenport=$SmbPort listenaddress=0.0.0.0",
+    "netsh interface portproxy add v4tov4 listenport=$SmbPort listenaddress=0.0.0.0 connectport=$SmbPort connectaddress=$Ip",
+    "netsh advfirewall firewall delete rule name=$FwName",
+    "netsh advfirewall firewall add rule name=$FwName dir=in action=allow protocol=TCP localport=$SmbPort profile=private")
+}
+
+function Get-LanIp {
+  $ip = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    Where-Object { $_.InterfaceAlias -notmatch 'vEthernet|Loopback|Tailscale|WSL|VirtualBox|VMware' -and $_.IPAddress -notlike '169.254.*' -and "$($_.PrefixOrigin)" -in 'Dhcp', 'Manual' } |
+    Select-Object -First 1 -ExpandProperty IPAddress
+  if ($ip) { $ip } else { $env:COMPUTERNAME }
 }
 
 function Get-AttachCommands($e, [switch]$AfterRelease) {
@@ -297,6 +408,43 @@ try {
       Out-Json ([ordered]@{ ok = $true; letter = $entry.letter; label = $entry.label; readwrite = [bool]$ReadWrite })
     }
 
+    'share' {
+      if ($Disk -lt 0 -or $Partition -lt 0) { throw 'share needs -Disk and -Partition' }
+      $pre = Get-Prereqs
+      $distro = $pre.distro
+      $state = @(Get-LiveState $distro)
+      $e = $state | Where-Object { $_.disk -eq $Disk -and $_.partition -eq $Partition } | Select-Object -First 1
+      if (-not $e) { throw 'Mount it first, then share it.' }
+      $e | Add-Member -NotePropertyName shared -NotePropertyValue $true -Force
+      $r = Update-Samba $distro $state
+      if ($r.code -ne 0) { throw ('Samba could not start: ' + (($r.out | Select-Object -Last 3) -join ' ')) }
+      $wslIp = "$($r.out | Select-Object -Last 1)".Trim()
+      if ($wslIp -notmatch '^\d+\.\d+\.\d+\.\d+$') { throw "Could not read WSL's address ($wslIp)" }
+      if (-not (Test-Forward $wslIp)) {
+        $x = Invoke-Elevated (Get-ForwardCommands $wslIp)
+        if ($x.code -eq -2) { throw $x.text }
+        if (-not (Test-Forward $wslIp)) { throw 'Could not set up the network forwarding (port 4450).' }
+      }
+      Save-State $state
+      $lan = Get-LanIp
+      $name = Get-ShareName $e
+      $pw = Get-SambaPassword
+      $ro = if ($e.readwrite) { '' } else { ' (read-only)' }
+      Out-Json ([ordered]@{ ok = $true; url = "smb://${lan}:$SmbPort/$name"; user = $SmbUser; password = $pw
+        message = "Shared$ro`nsmb://${lan}:$SmbPort/$name`nuser $SmbUser   password $pw" })
+    }
+
+    'unshare' {
+      if ($Disk -lt 0 -or $Partition -lt 0) { throw 'unshare needs -Disk and -Partition' }
+      $pre = Get-Prereqs
+      $distro = $pre.distro
+      $state = @(Get-LiveState $distro)
+      foreach ($e in $state) { if ($e.disk -eq $Disk -and $e.partition -eq $Partition) { $e | Add-Member -NotePropertyName shared -NotePropertyValue $false -Force } }
+      Update-Samba $distro $state | Out-Null
+      Save-State $state
+      Out-Json ([ordered]@{ ok = $true; message = 'No longer shared on the network.' })
+    }
+
     'unmount' {
       if ($Disk -lt 0) { throw 'unmount needs -Disk' }
       $pre = Get-Prereqs
@@ -310,12 +458,15 @@ try {
       # the plain "wsl --unmount" (all disks) works. So: release everything and
       # re-attach the disks that should stay, in the same admin prompt.
       foreach ($e in $state) { Stop-Letter $e }
+      $wasShared = @($state | Where-Object { $_.shared }).Count -gt 0
+      if ($wasShared) { Stop-Samba $distro }
       Start-Sleep -Milliseconds 800
       $cmds = @('wsl --unmount')
       foreach ($e in $keep) { $cmds += Get-AttachCommands $e -AfterRelease }
       $r = Invoke-Elevated $cmds
       if ($r.code -eq -2) {
         foreach ($e in $state) { try { Start-Letter $e $distro $pre.rclone } catch {} }
+        if ($wasShared) { Update-Samba $distro $state | Out-Null }
         throw $r.text
       }
 
@@ -329,6 +480,7 @@ try {
       }
       $keep = @($keep | Where-Object { $lost -notcontains "$($_.letter) $($_.label)" })
       Save-State $keep
+      if ($wasShared) { Update-Samba $distro $keep | Out-Null }
       if ($keep.Count -eq 0) { Stop-KeepAlive }
       if ($still.Count -gt 0) { throw "WSL could not release the disk: $($r.text) (try: wsl --shutdown)" }
 

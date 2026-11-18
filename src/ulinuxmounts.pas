@@ -4,7 +4,8 @@
    Shift+right-click a drive button -> "Linux partitions..." runs
    tools\linux\linuxmount.ps1 (next to doublecmd.exe) to list every Linux
    partition (fast: partition table only, no admin, does not start WSL),
-   then offers Mount read-only / Mount read-write / Unmount for each one.
+   then offers Mount read-only / Mount read-write / Unmount for each one,
+   and Share on network (Samba in WSL, smb://<pc>:4450/<name>) for mounted ones.
    Mounting goes through WSL2 (one admin prompt) + rclone/WinFsp; it runs in
    a background thread so the window never freezes, and the drive bar is
    refreshed when it finishes.
@@ -24,11 +25,11 @@ procedure LinuxMountsShutdown;
 implementation
 
 uses
-  SysUtils, Process, Menus, Forms, fpjson, jsonparser,
+  SysUtils, Process, Menus, Forms, Clipbrd, fpjson, jsonparser,
   uShowMsg, uGlobsPaths, uMetrics;
 
 type
-  TActionKind = (akMountRO, akMountRW, akUnmount);
+  TActionKind = (akMountRO, akMountRW, akUnmount, akShare, akUnshare);
 
   TLinuxMenu = class(TComponent)
   public
@@ -139,12 +140,19 @@ begin
   try
     if Assigned(R) and R.Get('ok', False) then
     begin
-      if R.IndexOfName('letter') >= 0 then
+      if R.IndexOfName('url') >= 0 then
+      begin
+        Clipboard.AsText := R.Get('url', '');
+        Msg := R.Get('message', '') + LineEnding + '(address copied to the clipboard)';
+        msgToast(Msg, 15000);
+        Msg := '';
+      end
+      else if R.IndexOfName('letter') >= 0 then
         Msg := Format('%s on %s', [FWhat, R.Get('letter', '')]) +
                LineEnding + R.Get('label', '')
       else
         Msg := R.Get('message', FWhat + ' done');
-      msgToast(Msg, 4000);
+      if Msg <> '' then msgToast(Msg, 4000);
     end
     else if Assigned(R) then
       msgToast(FWhat + ' failed:' + LineEnding + R.Get('error', R.Get('message', '?')), 6000)
@@ -174,8 +182,8 @@ var
   Disk, Part: String;
 begin
   Item := Sender as TMenuItem;
-  Idx := Item.Tag div 4;
-  Kind := TActionKind(Item.Tag mod 4);
+  Idx := Item.Tag div 8;
+  Kind := TActionKind(Item.Tag mod 8);
   if (Idx < 0) or (Idx >= Parts.Count) then Exit;
   P := Parts.Objects[Idx];
   Disk := IntToStr(P.Get('disk', -1));
@@ -196,6 +204,14 @@ begin
         msgToast('Releasing ' + P.Get('letter', '') + '...' + LineEnding + 'Approve the Windows admin prompt.', 5000);
         TLinuxJob.Create(['unmount', '-Disk', Disk, '-Partition', Part], 'Unmount');
       end;
+    akShare:
+      begin
+        msgToast('Sharing ' + P.Get('letter', '') + ' on the network...' + LineEnding +
+                 'The first time Samba is set up in WSL; approve the admin prompt if one appears.', 6000);
+        TLinuxJob.Create(['share', '-Disk', Disk, '-Partition', Part], 'Share');
+      end;
+    akUnshare:
+      TLinuxJob.Create(['unshare', '-Disk', Disk, '-Partition', Part], 'Stop sharing');
   end;
 end;
 
@@ -214,7 +230,7 @@ var
   begin
     mi := TMenuItem.Create(Head);
     mi.Caption := ACaption;
-    mi.Tag := I * 4 + Ord(Kind);
+    mi.Tag := I * 8 + Ord(Kind);
     mi.Enabled := AEnabled;
     mi.OnClick := @FMenu.ItemClick;
     Head.Add(mi);
@@ -281,7 +297,8 @@ begin
       [P.Get('disk_name', '?'), P.Get('disk', 0), P.Get('partition', 0),
        FormatFloat('0.#', P.Get('size_gb', 0.0)), P.Get('type', '')]);
     if Letter <> '' then
-      Caption := Caption + '  [on ' + Letter + ' ' + P.Get('label', '') + ']'
+      Caption := Caption + '  [on ' + Letter + ' ' + P.Get('label', '') +
+                 BoolToStr(P.Get('shared', False), ', shared on network', '') + ']'
     else if not P.Get('mountable', False) then
       Caption := Caption + '  (' + P.Get('reason', 'not mountable') + ')'
     else if P.Get('hides', '') <> '' then
@@ -300,6 +317,11 @@ begin
     Sub.Caption := '-';
     Head.Add(Sub);
     AddSub('Unmount (release the disk)', akUnmount, Letter <> '');
+    Sub := TMenuItem.Create(Head);
+    Sub.Caption := '-';
+    Head.Add(Sub);
+    AddSub('Share on network (smb, port 4450)', akShare, (Letter <> '') and not P.Get('shared', False));
+    AddSub('Stop sharing ' + P.Get('share_name', ''), akUnshare, P.Get('shared', False));
   end;
   FMenu.Menu.PopUp(X, Y);
 end;
