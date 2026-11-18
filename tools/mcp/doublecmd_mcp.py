@@ -19,6 +19,8 @@ from __future__ import annotations
 import json
 import os
 import platform
+import subprocess
+import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -190,6 +192,42 @@ def run_command(command: str, params: list[str] | None = None) -> Any:
     """Run any Double Commander command, e.g. cm_ViewHistory, cm_CalculateSpace,
     cm_PackFiles, cm_SyncDirs, with optional 'key=value' params. Acts on the active panel."""
     return rpc("run_command", command=command, params=params)
+
+
+ACTIONS_DIR = Path(__file__).resolve().parent.parent / "actions"
+
+
+def launch_action(script: str, args: list[str]) -> str:
+    """Start an action script in its own console window (it may run for a long time)."""
+    cmd = [sys.executable, str(ACTIONS_DIR / script), *args]
+    if platform.system() == "Windows":
+        subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_CONSOLE)
+        return "Started in a new console window on the user's desktop."
+    log = ACTIONS_DIR / f"{Path(script).stem}.log"
+    subprocess.Popen(cmd, stdout=open(log, "w"), stderr=subprocess.STDOUT, start_new_session=True)
+    return f"Started in the background; output in {log}"
+
+
+@mcp.tool(annotations=WRITES_FILES)
+def send_to_ps4(paths: list[str]) -> Any:
+    """Send .pkg files (full paths) to the PS4's Remote Package Installer. The PS4 must have
+    RPI open. Opens a window on the user's desktop that serves the files until the PS4 has
+    downloaded them; the user can watch progress there."""
+    missing = [p for p in paths if not Path(p).is_file()]
+    if missing:
+        raise RuntimeError(f"Not found: {missing}")
+    return launch_action("send_to_ps4.py", list(paths))
+
+
+@mcp.tool(annotations=WRITES_FILES)
+def wii_install(paths: list[str], drive: str | None = None) -> Any:
+    """Install GameCube images (.rvz/.iso/.gcz/...) as Nintendont game.iso and Wii .wbfs games
+    onto the USB Loader GX drive (default L:, or `drive`). Converts with DolphinTool, skips games
+    already installed, never changes the sources. Runs in a window on the user's desktop."""
+    missing = [p for p in paths if not Path(p).is_file()]
+    if missing:
+        raise RuntimeError(f"Not found: {missing}")
+    return launch_action("wii_install.py", list(paths) + (["--drive", drive] if drive else []))
 
 
 if __name__ == "__main__":

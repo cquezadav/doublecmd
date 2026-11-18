@@ -256,6 +256,9 @@ type
    procedure cm_Keyboard(const {%H-}Params: array of string);
    procedure cm_VisitHomePage(const {%H-}Params: array of string);
    procedure cm_About(const {%H-}Params: array of string);
+   procedure cm_LinuxPartitions(const {%H-}Params: array of string); // [my-custom]
+   procedure cm_AgentControl(const {%H-}Params: array of string);    // [my-custom]
+   procedure cm_DiskTools(const {%H-}Params: array of string);       // [my-custom]
    procedure cm_ShowSysFiles(const {%H-}Params: array of string);
    procedure cm_SwitchIgnoreList(const Params: array of string);
    procedure cm_Options(const Params: array of string);
@@ -388,7 +391,7 @@ type
 
 implementation
 
-uses fOptionsPluginsBase, fOptionsPluginsDSX, fOptionsPluginsWCX,
+uses {$IFDEF MSWINDOWS}uDiskTools, {$ENDIF}fOptionsPluginsBase, fOptionsPluginsDSX, fOptionsPluginsWCX,
      fOptionsPluginsWDX, fOptionsPluginsWFX, fOptionsPluginsWLX, uFlatViewFileSource,
      uFindFiles, Forms, Controls, Dialogs, Clipbrd, strutils, LCLProc, HelpIntfs, DCStringHashListUtf8,
      dmHelpManager, typinfo, fMain, fPackDlg, fMkDir, DCDateTimeUtils, KASToolBar, KASToolItems,
@@ -2950,6 +2953,26 @@ var
   ErrMsg: String = '';
 begin
   dmHelpMgr.HTMLHelpDatabase.ShowURL('https://doublecmd.sourceforge.io','Double Commander Web Site', ErrMsg);
+end;
+
+// [my-custom] Linux partitions menu (mount / unmount through WSL2)
+procedure TMainCommands.cm_LinuxPartitions(const Params: array of string);
+begin
+  frmMain.ShowLinuxPartitions;
+end;
+
+// [my-custom] Disk tools window (format, check / repair, partitions)
+procedure TMainCommands.cm_DiskTools(const Params: array of string);
+begin
+{$IFDEF MSWINDOWS}
+  ShowDiskTools('');
+{$ENDIF}
+end;
+
+// [my-custom] Agent control (MCP server) on / off
+procedure TMainCommands.cm_AgentControl(const Params: array of string);
+begin
+  frmMain.ToggleAgentControl;
 end;
 
 procedure TMainCommands.cm_About(const Params: array of string);

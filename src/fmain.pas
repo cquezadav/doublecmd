@@ -601,6 +601,13 @@ type
     // [my-custom] hide/unhide drives from the drive bar
     procedure ShowDriveHideMenu(ADrive: PDrive; X, Y: Integer);
     procedure miHideDriveClick(Sender: TObject);
+    procedure miLinuxPartsClick(Sender: TObject);        // [my-custom] Linux partitions submenu
+    procedure ShowLinuxPartsMenu(Data: PtrInt);
+    procedure LinuxMountsChanged(Sender: TObject);
+    procedure AddMyToolbarButtons(Data: PtrInt);         // [my-custom] one-time toolbar setup
+    procedure ToggleAgentControl;                        // [my-custom]
+    procedure ShowLinuxPartitions;                       // [my-custom]
+    procedure miDiskToolsClick(Sender: TObject);         // [my-custom]
     procedure miUnhideDriveClick(Sender: TObject);
     procedure DelayedUpdateDiskCount(Data: PtrInt);
     procedure lblAllProgressPctClick(Sender: TObject);
@@ -973,7 +980,7 @@ uses
   uHotDir, uFileSorting, DCBasicTypes, foptionsDirectoryHotlist, uConnectionManager,
   fOptionsToolbarBase, fOptionsToolbarMiddle, fEditor, uColumns, StrUtils, uSysFolders,
   uColumnsFileView, dmHigh, uFileSourceOperationMisc, uVfsModule,
-  uMetrics, uMetricsHooks, uAgentServer
+  uMetrics, uMetricsHooks, uAgentServer, uDriveIcons{$IFDEF MSWINDOWS}, uLinuxMounts, uDiskTools{$ENDIF}
 {$IFDEF MSWINDOWS}
   , uShellFileSource, uNetworkThread
 {$ENDIF}
@@ -1290,15 +1297,22 @@ begin
   MetricsItem.Checked := AgentServerEnabled;
   MetricsItem.OnClick := @miAgentClick;
   mnuConfig.Insert(mnuConfig.IndexOf(mnuConfigOptions) + 2, MetricsItem);
+  Application.QueueAsyncCall(@AddMyToolbarButtons, 0);
 end;
 
 procedure TfrmMain.miAgentClick(Sender: TObject);
-var
-  Item: TMenuItem;
 begin
-  Item := Sender as TMenuItem;
+  ToggleAgentControl;
+end;
+
+procedure TfrmMain.ToggleAgentControl;
+var
+  Item: TComponent;
+begin
   AgentServerSetEnabled(not AgentServerEnabled);
-  Item.Checked := AgentServerEnabled;
+  Item := mnuConfig.FindComponent('mnuAgentControl');
+  if Item is TMenuItem then
+    TMenuItem(Item).Checked := AgentServerEnabled;
   if AgentServerRunning then
     msgToast(Format('Agent control ON (127.0.0.1:%d)', [AgentServerPort]) + LineEnding + AgentEndpointFile, 4000)
   else if AgentServerEnabled then
@@ -1565,7 +1579,110 @@ begin
     Hidden.Free;
   end;
 
+{$IFDEF MSWINDOWS}
+  // [my-custom] Linux partitions (WSL2 + rclone)
+  mi := TMenuItem.Create(FDriveHideMenu);
+  mi.Caption := '-';
+  FDriveHideMenu.Items.Add(mi);
+  mi := TMenuItem.Create(FDriveHideMenu);
+  mi.Caption := 'Linux partitions...';
+  mi.OnClick := @miLinuxPartsClick;
+  FDriveHideMenu.Items.Add(mi);
+  mi := TMenuItem.Create(FDriveHideMenu);
+  mi.Caption := 'Disk tools (format, check, partitions)...';
+  mi.Hint := ADrive^.Path;
+  mi.OnClick := @miDiskToolsClick;
+  FDriveHideMenu.Items.Add(mi);
+{$ENDIF}
+
   FDriveHideMenu.PopUp(X, Y);
+end;
+
+procedure TfrmMain.miLinuxPartsClick(Sender: TObject);
+begin
+  // Open the next menu after this one has fully closed.
+  Application.QueueAsyncCall(@ShowLinuxPartsMenu, 0);
+end;
+
+procedure TfrmMain.ShowLinuxPartsMenu(Data: PtrInt);
+var
+  P: TPoint;
+begin
+{$IFDEF MSWINDOWS}
+  P := Mouse.CursorPos;
+  LinuxPartitionsMenu(P.X, P.Y, @LinuxMountsChanged);
+{$ENDIF}
+end;
+
+procedure TfrmMain.LinuxMountsChanged(Sender: TObject);
+begin
+  Application.QueueAsyncCall(@DelayedUpdateDiskCount, 0);
+end;
+
+procedure TfrmMain.miDiskToolsClick(Sender: TObject);
+begin
+{$IFDEF MSWINDOWS}
+  ShowDiskTools((Sender as TMenuItem).Hint);
+{$ENDIF}
+end;
+
+procedure TfrmMain.ShowLinuxPartitions;
+begin
+  Application.QueueAsyncCall(@ShowLinuxPartsMenu, 0);
+end;
+
+procedure TfrmMain.AddMyToolbarButtons(Data: PtrInt);
+const
+  Marker = 'mycustom-toolbar-v1.done';
+  Marker2 = 'mycustom-toolbar-v2.done';
+var
+  Cmd: TKASCommandItem;
+  SL: TStringList;
+begin
+  // Added once; afterwards the user can move or remove them like any button.
+  if not FileExists(gpCfgDir + Marker) then
+  begin
+  MainToolBar.AddButton(TKASSeparatorItem.Create);
+{$IFDEF MSWINDOWS}
+  Cmd := TKASCommandItem.Create(Commands.Commands);
+  Cmd.Command := 'cm_LinuxPartitions';
+  Cmd.Icon := '%windir%\System32\wsl.exe,0';
+  Cmd.Hint := 'Linux partitions: mount / unmount';
+  MainToolBar.AddButton(Cmd);
+{$ENDIF}
+  Cmd := TKASCommandItem.Create(Commands.Commands);
+  Cmd.Command := 'cm_AgentControl';
+  Cmd.Icon := '%windir%\System32\imageres.dll,291';
+  Cmd.Hint := 'Agent control (MCP server): on / off';
+  MainToolBar.AddButton(Cmd);
+  SaveToolBar(MainToolBar);
+  SL := TStringList.Create;
+  try
+    SL.Text := 'Delete this file to add the my-custom toolbar buttons again.';
+    SL.SaveToFile(gpCfgDir + Marker);
+  finally
+    SL.Free;
+  end;
+  end;
+{$IFDEF MSWINDOWS}
+  // v2: Disk tools button
+  if not FileExists(gpCfgDir + Marker2) then
+  begin
+    Cmd := TKASCommandItem.Create(Commands.Commands);
+    Cmd.Command := 'cm_DiskTools';
+    Cmd.Icon := '%windir%\System32\imageres.dll,30';
+    Cmd.Hint := 'Disk tools: format, check / repair, partitions';
+    MainToolBar.AddButton(Cmd);
+    SaveToolBar(MainToolBar);
+    SL := TStringList.Create;
+    try
+      SL.Text := 'Delete this file to add the Disk tools toolbar button again.';
+      SL.SaveToFile(gpCfgDir + Marker2);
+    finally
+      SL.Free;
+    end;
+  end;
+{$ENDIF}
 end;
 
 procedure TfrmMain.miHideDriveClick(Sender: TObject);
@@ -1990,6 +2107,9 @@ begin
   // [my-custom] drop a pending DelayedUpdateDiskCount, if any
   Application.RemoveAsyncCalls(Self);
   AgentServerShutdown;  // [my-custom]
+{$IFDEF MSWINDOWS}
+  LinuxMountsShutdown;  // [my-custom]
+{$ENDIF}
   MetricsHooksRemove;
 
   if Assigned(HotMan) then
@@ -5371,7 +5491,10 @@ begin
       Button := dskPanel.AddButton(ToolItem);
 
       // Set drive icon.
-      BitmapTmp := PixMapManager.GetDriveIcon(Drive, dskPanel.GlyphSize, clBtnFace, False);
+      // [my-custom] cloud / Linux drives get their own icon
+      BitmapTmp := CustomDriveIcon(Drive, dskPanel.GlyphSize, clBtnFace);
+      if not Assigned(BitmapTmp) then
+        BitmapTmp := PixMapManager.GetDriveIcon(Drive, dskPanel.GlyphSize, clBtnFace, False);
       Button.Glyph := BitmapTmp;
       FreeAndNil(BitmapTmp);
 
@@ -6885,7 +7008,9 @@ begin
   begin
     Drive := DrivesList[DriveButton.Tag];
     DriveButton.Caption := Drive^.DisplayName;
-    BitmapTmp := PixMapManager.GetDriveIcon(Drive, gDiskIconsSize, DriveButton.Color);
+    BitmapTmp := CustomDriveIcon(Drive, gDiskIconsSize, DriveButton.Color); // [my-custom]
+    if not Assigned(BitmapTmp) then
+      BitmapTmp := PixMapManager.GetDriveIcon(Drive, gDiskIconsSize, DriveButton.Color);
   end
   else
   begin

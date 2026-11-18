@@ -1,0 +1,10 @@
+{
+  "ps4": {
+    "ps4_ip": "192.168.1.113",
+    "rpi_port": 12800
+  },
+  "wii": {
+    "dolphin_tool": "C:\\development\\wii\\tools\\Dolphin-x64\\DolphinTool.exe",
+    "drive": "L:"
+  }
+}
